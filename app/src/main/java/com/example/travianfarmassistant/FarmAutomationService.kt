@@ -1097,8 +1097,8 @@ class FarmAutomationService : Service() {
             (async () => {
                 const villages = [];
                 const seen = new Set();
-                const cleanName = value => String(value || '').replace(/\s+/g, ' ').trim();
-                const add = (value, nameHint = '') => {
+                const clean = s => String(s || '').replace(/\s+/g,' ').trim();
+                const add = (value, nameHint='') => {
                     const text = String(value || '');
                     const patterns = [
                         /[?&]newdid=(\d+)/i,
@@ -1107,15 +1107,14 @@ class FarmAutomationService : Service() {
                     let id = null;
                     for (const re of patterns) {
                         const m = text.match(re);
-                        if (m) { id = m[1]; break; }
+                        if (m) { id=m[1]; break; }
                     }
                     if (id && !seen.has(id)) {
                         seen.add(id);
-                        villages.push({id, name: cleanName(nameHint) || ('Village ' + id)});
+                        villages.push({id, name: clean(nameHint) || ('Village ' + id)});
                     }
                 };
-
-                const scanRoot = root => {
+                const scan = root => {
                     if (!root) return;
                     for (const a of root.querySelectorAll('li a[href*="newdid="], a[href*="newdid="]')) {
                         const name = a.innerText || a.textContent || a.getAttribute('title') || a.getAttribute('aria-label') || '';
@@ -1126,23 +1125,18 @@ class FarmAutomationService : Service() {
                         const name = el.innerText || el.textContent || el.getAttribute('title') || '';
                         add(el.getAttribute('data-did') || el.getAttribute('data-village-id') || el.getAttribute('data-villageid') || el.getAttribute('data-newdid'), name);
                     }
-                    for (const el of root.querySelectorAll('[onclick],[title],[data-href],[href]')) {
+                    for (const el of root.querySelectorAll('[onclick],[title],[data-href]')) {
                         const name = el.innerText || el.textContent || el.getAttribute('title') || el.getAttribute('aria-label') || '';
                         add(el.getAttribute('onclick'), name);
-                        add(el.getAttribute('title'), name);
                         add(el.getAttribute('data-href'), name);
-                        add(el.getAttribute('href'), name);
                     }
                 };
 
-                const roots = [
-                    document.querySelector('#sidebarBoxVillagelist'),
-                    document.querySelector('#villageList'),
-                    document.querySelector('#villageList .list'),
-                    document.querySelector('#side_info'),
-                    document.body
-                ].filter(Boolean);
-                roots.forEach(scanRoot);
+                [document.querySelector('#sidebarBoxVillagelist'),
+                 document.querySelector('#villageList'),
+                 document.querySelector('#villageList .list'),
+                 document.querySelector('#side_info'),
+                 document.body].filter(Boolean).forEach(scan);
 
                 const current = location.search.match(/[?&]newdid=(\d+)/i);
                 if (current && !seen.has(current[1])) {
@@ -1153,13 +1147,13 @@ class FarmAutomationService : Service() {
                 const bodyText = (document.body.innerText || '').replace(/\s+/g, ' ');
                 let expected = 0;
                 const countMatch = bodyText.match(/VILLAGES\s+(\d+)\s*\/\s*\d+/i) ||
-                                   bodyText.match(/VILLAGES\s*\(?(\d+)\s*\/\s*\d+\)?/i);
+                                   bodyText.match(/VILLAGES\s*\(?\s*(\d+)\s*\/\s*\d+\)?/i);
                 if (countMatch) expected = parseInt(countMatch[1], 10) || 0;
 
                 if (expected > 0 && villages.length < expected) {
                     try {
                         let uid = null;
-                        const profileLink = [...document.querySelectorAll('a[href*="spieler.php?uid="]')]
+                        const profileLink = [...document.querySelectorAll('a[href]')]
                             .map(a => a.getAttribute('href') || '')
                             .find(h => /spieler\.php\?uid=\d+/i.test(h));
                         if (profileLink) {
@@ -1172,83 +1166,84 @@ class FarmAutomationService : Service() {
                             });
                             const html = await response.text();
                             const doc = new DOMParser().parseFromString(html, 'text/html');
-                            for (const root of [doc.querySelector('#villageList'), doc.querySelector('#sidebarBoxVillagelist'), doc.body].filter(Boolean)) {
-                                for (const a of root.querySelectorAll('a[href*="newdid="]')) {
-                                    const name = a.innerText || a.textContent || a.getAttribute('title') || a.getAttribute('aria-label') || '';
-                                    add(a.getAttribute('href'), name);
-                                }
-                            }
+                            for (const root of [doc.querySelector('#villageList'),
+                                                doc.querySelector('#sidebarBoxVillagelist'),
+                                                doc.body].filter(Boolean)) scan(root);
                         }
                     } catch (e) {}
                 }
 
-                return JSON.stringify({villages, expected});
-            })();
+                AndroidFarm.onVillageListResult(JSON.stringify({villages, expected}));
+            })().catch(e => AndroidFarm.onVillageListResult(JSON.stringify({villages:[],expected:0,error:String(e)})));
         """.trimIndent()
-        automationWebView()?.evaluateJavascript(js) { raw ->
-            val decoded = raw.orEmpty().trim('"')
-                .replace("\\\"", "\"")
-                .replace("\\\\", "\\")
-            val json = runCatching { JSONObject(decoded) }.getOrNull()
-            val villages = mutableListOf<Pair<String, String>>()
-            val villageArray = json?.optJSONArray("villages")
-            if (villageArray != null) {
-                for (i in 0 until villageArray.length()) {
-                    val item = villageArray.optJSONObject(i) ?: continue
-                    val id = item.optString("id").trim()
-                    val name = item.optString("name").trim().ifBlank { "Village $id" }
-                    if (id.isNotBlank()) villages.add(id to name)
-                }
-            }
-            val uniqueVillages = villages.distinctBy { it.first }
-            val expected = json?.optInt("expected", 0) ?: 0
-            var selectedVillages = if (builderSelectionConfigured) {
-                uniqueVillages.filter { selectedBuilderVillageIds.contains(it.first) }
-            } else uniqueVillages
+        automationWebView()?.evaluateJavascript(js, null)
+    }
 
-            // Jika halaman Travian hanya menampilkan sebagian sidebar, gunakan daftar
-            // village yang sudah berhasil dimuat dan dipilih di UI sebagai fallback.
-            if (builderSelectionConfigured && selectedVillages.size < selectedBuilderVillageIds.size) {
-                val savedArray = runCatching { org.json.JSONArray(selectedBuilderVillagesJson) }.getOrNull()
-                if (savedArray != null) {
-                    val savedVillages = mutableListOf<Pair<String, String>>()
-                    for (i in 0 until savedArray.length()) {
-                        val item = savedArray.optJSONObject(i) ?: continue
-                        val id = item.optString("id").trim()
-                        val name = item.optString("name").trim().ifBlank { "Village $id" }
-                        if (id.isNotBlank() && selectedBuilderVillageIds.contains(id)) savedVillages.add(id to name)
-                    }
-                    if (savedVillages.size >= selectedBuilderVillageIds.size) selectedVillages = savedVillages
-                }
-            }
+    private fun handleVillageListResult(rawJson: String) {
+        if (!running || !builderInProgress) return
 
-            if (builderSelectionConfigured && selectedBuilderVillageIds.isEmpty()) {
-                builderVillages = mutableListOf()
-                logEvent("Resource Builder: tidak ada village yang dicentang; Builder dilewati pada siklus ini")
-                finishResourceBuilderCycle()
-                return@evaluateJavascript
-            }
-
-            val completeSelectedList = builderSelectionConfigured &&
-                selectedBuilderVillageIds.isNotEmpty() &&
-                selectedVillages.size >= selectedBuilderVillageIds.size
-
-            if (uniqueVillages.isEmpty() || ((expected > 0 && uniqueVillages.size < expected) && !completeSelectedList)) {
-                if (builderAttempt < 6) {
-                    builderAttempt++
-                    logEvent("Resource Builder: village terdeteksi ${uniqueVillages.size}${if (expected > 0) "/$expected" else ""}; retry ${builderAttempt}/6")
-                    handler.postDelayed({ discoverVillagesForBuilder() }, 1500)
-                } else {
-                    logEvent("Resource Builder: daftar village belum lengkap setelah 6 retry (${uniqueVillages.size}${if (expected > 0) "/$expected" else ""}); siklus dibatalkan agar tidak memproses sebagian village")
-                    finishResourceBuilderCycle()
-                }
-            } else {
-                builderVillages = selectedVillages.toMutableList()
-                builderAttempt = 0
-                logEvent("Resource Builder: ${uniqueVillages.size} village ditemukan; ${selectedVillages.size} village dipilih: ${selectedVillages.joinToString(" | ") { "${it.second} [${it.first}]" }}")
-                processResourceBuilderVillage()
+        val json = runCatching { JSONObject(rawJson) }.getOrNull()
+        val villages = mutableListOf<Pair<String, String>>()
+        val villageArray = json?.optJSONArray("villages")
+        if (villageArray != null) {
+            for (i in 0 until villageArray.length()) {
+                val item = villageArray.optJSONObject(i) ?: continue
+                val id = item.optString("id").trim()
+                val name = item.optString("name").trim().ifBlank { "Village $id" }
+                if (id.isNotBlank()) villages.add(id to name)
             }
         }
+
+        val uniqueVillages = villages.distinctBy { it.first }
+        val expected = json?.optInt("expected", 0) ?: 0
+        var selectedVillages = if (builderSelectionConfigured) {
+            uniqueVillages.filter { selectedBuilderVillageIds.contains(it.first) }
+        } else uniqueVillages
+
+        // Gunakan daftar tersimpan dari UI bila halaman aktif tidak merender sidebar lengkap.
+        if (builderSelectionConfigured && selectedVillages.size < selectedBuilderVillageIds.size) {
+            val savedArray = runCatching { org.json.JSONArray(selectedBuilderVillagesJson) }.getOrNull()
+            if (savedArray != null) {
+                val savedVillages = mutableListOf<Pair<String, String>>()
+                for (i in 0 until savedArray.length()) {
+                    val item = savedArray.optJSONObject(i) ?: continue
+                    val id = item.optString("id").trim()
+                    val name = item.optString("name").trim().ifBlank { "Village $id" }
+                    if (id.isNotBlank() && selectedBuilderVillageIds.contains(id)) {
+                        savedVillages.add(id to name)
+                    }
+                }
+                if (savedVillages.size >= selectedBuilderVillageIds.size) selectedVillages = savedVillages
+            }
+        }
+
+        if (builderSelectionConfigured && selectedBuilderVillageIds.isEmpty()) {
+            builderVillages = mutableListOf()
+            logEvent("Resource Builder: tidak ada village yang dicentang; Builder dilewati pada siklus ini")
+            finishResourceBuilderCycle()
+            return
+        }
+
+        val completeSelectedList = builderSelectionConfigured &&
+            selectedBuilderVillageIds.isNotEmpty() &&
+            selectedVillages.size >= selectedBuilderVillageIds.size
+
+        if (uniqueVillages.isEmpty() || ((expected > 0 && uniqueVillages.size < expected) && !completeSelectedList)) {
+            if (builderAttempt < 10) {
+                builderAttempt++
+                logEvent("Resource Builder: village terdeteksi ${uniqueVillages.size}${if (expected > 0) "/$expected" else ""}; retry ${builderAttempt}/10")
+                handler.postDelayed({ discoverVillagesForBuilder() }, 1800)
+            } else {
+                logEvent("Resource Builder: daftar village belum lengkap setelah 10 retry (${uniqueVillages.size}${if (expected > 0) "/$expected" else ""}); siklus dibatalkan agar tidak memproses sebagian village")
+                finishResourceBuilderCycle()
+            }
+            return
+        }
+
+        builderVillages = selectedVillages.toMutableList()
+        builderAttempt = 0
+        logEvent("Resource Builder: ${uniqueVillages.size} village ditemukan; ${selectedVillages.size} village dipilih: ${selectedVillages.joinToString(" | ") { "${it.second} [${it.first}]" }}")
+        processResourceBuilderVillage()
     }
 
     private fun scheduleNextRandomRun() {
@@ -1417,6 +1412,13 @@ class FarmAutomationService : Service() {
                         }
                     }
                 }
+            }
+        }
+
+        @JavascriptInterface
+        fun onVillageListResult(result: String) {
+            handler.post {
+                handleVillageListResult(result)
             }
         }
     }
