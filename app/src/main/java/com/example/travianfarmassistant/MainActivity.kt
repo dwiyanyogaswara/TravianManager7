@@ -461,9 +461,15 @@ class MainActivity : Activity() {
                 const clean = s => String(s || '').replace(/\s+/g,' ').trim();
                 const add = (value, nameHint='') => {
                     const text = String(value || '');
-                    const patterns = [/[?&]newdid=(\d+)/i, /(?:newdid|did|villageId|village_id)[=:'" ]+(\d+)/i];
+                    const patterns = [
+                        /[?&]newdid=(\d+)/i,
+                        /(?:newdid|did|villageId|village_id)[=:'" ]+(\d+)/i
+                    ];
                     let id = null;
-                    for (const re of patterns) { const m = text.match(re); if (m) { id=m[1]; break; } }
+                    for (const re of patterns) {
+                        const m = text.match(re);
+                        if (m) { id=m[1]; break; }
+                    }
                     if (id && !seen.has(id)) {
                         seen.add(id);
                         villages.push({id:id,name:clean(nameHint)||('Village '+id)});
@@ -480,9 +486,17 @@ class MainActivity : Activity() {
                         const name = el.innerText || el.textContent || el.getAttribute('title') || '';
                         add(el.getAttribute('data-did') || el.getAttribute('data-village-id') || el.getAttribute('data-villageid') || el.getAttribute('data-newdid'), name);
                     }
+                    for (const el of root.querySelectorAll('[onclick],[title],[data-href]')) {
+                        const name = el.innerText || el.textContent || el.getAttribute('title') || el.getAttribute('aria-label') || '';
+                        add(el.getAttribute('onclick'), name);
+                        add(el.getAttribute('data-href'), name);
+                    }
                 };
-                [document.querySelector('#sidebarBoxVillagelist'), document.querySelector('#villageList'), document.querySelector('#side_info'), document.body]
-                    .filter(Boolean).forEach(scan);
+
+                [document.querySelector('#sidebarBoxVillagelist'),
+                 document.querySelector('#villageList'),
+                 document.querySelector('#side_info'),
+                 document.body].filter(Boolean).forEach(scan);
 
                 const current = location.search.match(/[?&]newdid=(\d+)/i);
                 if (current && !seen.has(current[1])) {
@@ -492,60 +506,65 @@ class MainActivity : Activity() {
 
                 const bodyText = (document.body.innerText || '').replace(/\s+/g,' ');
                 let expected = 0;
-                const countMatch = bodyText.match(/VILLAGES\s+(\d+)\s*\/\s*\d+/i) || bodyText.match(/VILLAGES\s*\(?\s*(\d+)\s*\/\s*\d+\)?/i);
+                const countMatch = bodyText.match(/VILLAGES\s+(\d+)\s*\/\s*\d+/i) ||
+                                   bodyText.match(/VILLAGES\s*\(?\s*(\d+)\s*\/\s*\d+\)?/i);
                 if (countMatch) expected = parseInt(countMatch[1], 10) || 0;
 
+                // Farm List/mobile layout kadang tidak merender sidebar village.
+                // Ambil uid dari link profile lalu fetch halaman pemain.
                 if (expected > 0 && villages.length < expected) {
                     try {
                         let uid = null;
-                        const profileLink = [...document.querySelectorAll('a[href*="spieler.php?uid="]')]
-                            .map(a => a.getAttribute('href') || '')
+                        const links = [...document.querySelectorAll('a[href]')];
+                        const profileLink = links.map(a => a.getAttribute('href') || '')
                             .find(h => /spieler\.php\?uid=\d+/i.test(h));
                         if (profileLink) {
                             const m = profileLink.match(/[?&]uid=(\d+)/i);
                             if (m) uid = m[1];
                         }
                         if (uid) {
-                            const response = await fetch('spieler.php?uid=' + uid, {credentials:'include',cache:'no-store'});
+                            const response = await fetch('spieler.php?uid=' + uid, {
+                                credentials:'include', cache:'no-store'
+                            });
                             const html = await response.text();
                             const doc = new DOMParser().parseFromString(html, 'text/html');
-                            for (const root of [doc.querySelector('#villageList'), doc.querySelector('#sidebarBoxVillagelist'), doc.body].filter(Boolean)) {
-                                for (const a of root.querySelectorAll('a[href*="newdid="]')) {
-                                    const name = a.innerText || a.textContent || a.getAttribute('title') || a.getAttribute('aria-label') || '';
-                                    add(a.getAttribute('href'), name);
-                                }
-                            }
+                            for (const root of [doc.querySelector('#villageList'),
+                                                doc.querySelector('#sidebarBoxVillagelist'),
+                                                doc.body].filter(Boolean)) scan(root);
                         }
                     } catch (e) {}
                 }
 
-                return JSON.stringify({villages:villages,expected:expected});
-            })();
+                AndroidFarm.onVillageListResult(JSON.stringify({villages:villages,expected:expected}));
+            })().catch(e => AndroidFarm.onVillageListResult(JSON.stringify({villages:[],expected:0,error:String(e)})));
         """.trimIndent()
 
-        webView.evaluateJavascript(js) { raw ->
-            val decoded = raw.orEmpty().trim('"').replace("\\\"", "\"").replace("\\\\", "\\")
-            val json = runCatching { JSONObject(decoded) }.getOrNull()
-            val villages = mutableListOf<Pair<String,String>>()
-            val array = json?.optJSONArray("villages")
-            if (array != null) for (i in 0 until array.length()) {
-                val item = array.optJSONObject(i) ?: continue
-                val id = item.optString("id").trim()
-                val name = item.optString("name").trim().ifBlank { "Village $id" }
-                if (id.isNotBlank()) villages.add(id to name)
-            }
-            val unique = villages.distinctBy { it.first }
-            val expected = json?.optInt("expected", 0) ?: 0
-            if (unique.isEmpty()) {
-                farmStatus.text = "Village belum terlihat. Buka Travian/login terlebih dahulu."
-                logEvent("UI: daftar village tidak ditemukan")
+        // Penting: jangan memakai callback evaluateJavascript untuk hasil async.
+        // WebView tidak menunggu Promise; JS mengirim hasil lewat AndroidFarm.
+        webView.evaluateJavascript(js, null)
+    }
+
+    private fun handleVillageListResult(rawJson: String) {
+        val json = runCatching { JSONObject(rawJson) }.getOrNull()
+        val villages = mutableListOf<Pair<String,String>>()
+        val array = json?.optJSONArray("villages")
+        if (array != null) for (i in 0 until array.length()) {
+            val item = array.optJSONObject(i) ?: continue
+            val id = item.optString("id").trim()
+            val name = item.optString("name").trim().ifBlank { "Village $id" }
+            if (id.isNotBlank()) villages.add(id to name)
+        }
+        val unique = villages.distinctBy { it.first }
+        val expected = json?.optInt("expected", 0) ?: 0
+        if (unique.isEmpty()) {
+            farmStatus.text = "Village belum terlihat. Pastikan sudah login di Live WebView."
+            logEvent("UI: daftar village tidak ditemukan dari halaman aktif")
+        } else {
+            renderVillageChecklist(unique)
+            farmStatus.text = if (expected > 0 && unique.size < expected) {
+                "${unique.size}/$expected village terbaca; masih belum lengkap."
             } else {
-                renderVillageChecklist(unique)
-                farmStatus.text = if (expected > 0 && unique.size < expected) {
-                    "${unique.size}/$expected village terbaca; daftar yang terbaca ditampilkan."
-                } else {
-                    "${unique.size} village siap dipilih untuk Resource Builder."
-                }
+                "${unique.size} village siap dipilih untuk Resource Builder."
             }
         }
     }
@@ -976,6 +995,11 @@ class MainActivity : Activity() {
             status.text = "Status: RUNNING — menunggu siklus berikutnya"
         } else {
             status.text = "Status: RUNNING — BACKGROUND"
+        }
+
+        @JavascriptInterface
+        fun onVillageListResult(result: String) {
+            handler.post { handleVillageListResult(result) }
         }
     }
 
